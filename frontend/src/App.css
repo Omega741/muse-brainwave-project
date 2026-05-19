@@ -1,0 +1,76 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(5, 5, 10, 0.8);
+  backdrop-filter: blur(12px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* ── Grid layout ── */
+.grid {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  grid-template-rows: auto auto auto;
+  grid-template-areas:
+    "sleep  bands"
+    "eeg    eeg"
+    "quality artifacts";
+  gap: 12px;
+  padding: 16px;
+  flex: 1;
+}
+
+/* ── Footer ── */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ── Responsive ── */
+@media (max-width: 800px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "sleep"
+      "bands"
+      "eeg"
+      "quality"
+      "artifacts";
+  }
+}

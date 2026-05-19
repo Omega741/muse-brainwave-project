@@ -1,0 +1,29 @@
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Muse SDK binaries & installers (large, proprietary — not for public repo)
+Muse SDK 8.0.9/
+MuseLab 1.9.5/
+MuseLab 1.9.6/
+sdk-windows-extracted/
+
+# SDK docs (proprietary)
+*.docx
+Muse Lab Guide*.pdf
+
+# MuseLab demo zips
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
