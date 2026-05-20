@@ -304,8 +304,8 @@ class RealMuseStream:
 
                 now = time.time()
 
-                # Dead-outlet guard: LSL stream found but no data ever arrived
-                # (stale outlet race condition) — restart immediately.
+                # ── Stale-outlet guard (never got data + BLE already dead) ──────
+                # Catches connecting to a dead LSL stream from a previous session.
                 if not ever_got_data and not ble_thread.is_alive() and now - last_sample > 3.0:
                     print("[muse] No data from inlet and BLE dead — stale stream, restarting.")
                     try:
@@ -315,15 +315,20 @@ class RealMuseStream:
                     await asyncio.sleep(3.0)
                     break
 
-                # Disconnect detection: BLE thread dead + no data for N seconds.
-                if ever_got_data and not ble_thread.is_alive() and now - last_sample > _STALE_TIMEOUT:
+                # ── Data-based disconnect (primary detection) ─────────────────
+                # Windows BLE can hang 30+ seconds after headset turns off before
+                # lsl_stream() returns, so we can't rely on ble_thread.is_alive().
+                # Instead: if samples stop flowing for STALE_TIMEOUT seconds we
+                # know the headset is gone — emit DISCONNECTED immediately.
+                if ever_got_data and now - last_sample > _STALE_TIMEOUT:
                     print("[muse] Headset disconnected — will reconnect when turned on.")
                     yield {**_DISCONNECTED_PACKET_TEMPLATE, 'timestamp': round(now, 3)}
                     try:
                         inlet.close_stream()
                     except Exception:
                         pass
-                    break  # restart outer loop
+                    await asyncio.sleep(2.0)
+                    break
 
                 if now - last_yield >= 0.1:
                     sq, good_mask = _channel_quality(self._buffers)
@@ -355,6 +360,9 @@ class RealMuseStream:
                         }
                         last_yield = now
                     elif now - last_status >= 1.0:
+                        # Heartbeat while buffers are filling / signal settling.
+                        # Only sent when data is recent — won't fire after disconnect
+                        # because the data-based check above would have broken first.
                         yield {
                             'timestamp':      round(now, 3),
                             'connection':     'CONNECTED',
