@@ -6,8 +6,33 @@ import SignalQuality  from './components/SignalQuality'
 import ArtifactPanel  from './components/ArtifactPanel'
 import './App.css'
 
+function StatusPill({ wsConnected, headsetConnected }) {
+  let color, bg, border, label, pulse
+
+  if (!wsConnected) {
+    color = '#ef4444'; bg = 'rgba(239,68,68,0.12)'; border = '#ef444433'
+    label = 'Backend Offline'; pulse = false
+  } else if (headsetConnected) {
+    color = '#10b981'; bg = 'rgba(16,185,129,0.12)'; border = '#10b98133'
+    label = 'Headset Connected'; pulse = true
+  } else {
+    color = '#f59e0b'; bg = 'rgba(245,158,11,0.12)'; border = '#f59e0b33'
+    label = 'Reconnecting…'; pulse = true
+  }
+
+  return (
+    <span className="pill" style={{ background: bg, border: `1px solid ${border}`, color }}>
+      <span
+        className="dot"
+        style={{ background: color, animation: pulse ? 'pulse 1.5s infinite' : 'none' }}
+      />
+      {label}
+    </span>
+  )
+}
+
 export default function App() {
-  const { data, connected, mode } = useMuseWebSocket()
+  const { data, connected, wsConnected, mode } = useMuseWebSocket()
 
   return (
     <div className="app">
@@ -20,23 +45,7 @@ export default function App() {
           </span>
         </div>
         <div className="header-right">
-          <span
-            className="pill"
-            style={{
-              background: connected ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
-              border: `1px solid ${connected ? '#10b98133' : '#ef444433'}`,
-              color: connected ? '#10b981' : '#ef4444',
-            }}
-          >
-            <span
-              className="dot"
-              style={{
-                background: connected ? '#10b981' : '#ef4444',
-                animation: connected ? 'pulse 2s infinite' : 'none',
-              }}
-            />
-            {connected ? 'Connected' : 'Disconnected'}
-          </span>
+          <StatusPill wsConnected={wsConnected} headsetConnected={connected} />
 
           {data?.sleep_state && (
             <span

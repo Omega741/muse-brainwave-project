@@ -219,6 +219,19 @@ class ArtifactDetector:
         return {'blink': blink, 'jaw_clench': jaw}
 
 
+_DISCONNECTED_PACKET_TEMPLATE = {
+    'connection':     'DISCONNECTED',
+    'battery':        0,
+    'signal_quality': {'eeg1': 4, 'eeg2': 4, 'eeg3': 4, 'eeg4': 4},
+    'raw_eeg':        {'eeg1': 0.0, 'eeg2': 0.0, 'eeg3': 0.0, 'eeg4': 0.0},
+    'bands':          {b: {'absolute': 0.0, 'relative': 0.0, 'score': 0.0} for b in BANDS_ORDER},
+    'artifacts':      {'headband_on': False, 'blink': False, 'jaw_clench': False},
+}
+
+# Seconds with no new LSL samples before we declare the headset gone.
+_STALE_TIMEOUT = 4.0
+
+
 class RealMuseStream:
     def __init__(self, address: str | None = None):
         self.address   = address
@@ -229,47 +242,70 @@ class RealMuseStream:
     async def stream(self):
         loop = asyncio.get_event_loop()
 
-        ble_thread = Thread(target=_ble_stream_worker, args=(self.address,), daemon=True)
-        ble_thread.start()
+        while True:  # outer reconnect loop
+            ble_thread = Thread(target=_ble_stream_worker, args=(self.address,), daemon=True)
+            ble_thread.start()
 
-        inlet: pylsl.StreamInlet = await loop.run_in_executor(None, _connect_lsl_inlet)
+            inlet: pylsl.StreamInlet = await loop.run_in_executor(None, _connect_lsl_inlet)
 
-        last_yield = time.time()
+            last_yield  = time.time()
+            last_sample = time.time()
 
-        while True:
-            samples, _ = inlet.pull_chunk(timeout=0.0, max_samples=64)
-            for sample in samples:
-                for ch in range(min(CHANNELS, len(sample))):
-                    self._buffers[ch].append(float(sample[ch]))
+            # Clear stale buffer data from a previous session.
+            for buf in self._buffers:
+                buf.clear()
 
-            now = time.time()
-            if now - last_yield >= 0.1:
-                sq, good_mask = _channel_quality(self._buffers)
-                variances = [
-                    round(float(np.var(list(self._buffers[i])[-64:])), 1) if len(self._buffers[i]) >= 32 else None
-                    for i in range(CHANNELS)
-                ]
-                print(f"[quality] vars={variances} mask={good_mask} sq={sq}")
-                bands = _compute_bands(self._buffers, good_mask)
-                if bands:
-                    artifacts = self._artifact.detect(self._buffers, now, good_mask)
-                    raw = {
-                        f'eeg{i+1}': round(self._buffers[i][-1], 2) if self._buffers[i] else 0.0
+            # Inner data loop — runs until disconnect is detected.
+            while True:
+                samples, _ = inlet.pull_chunk(timeout=0.0, max_samples=64)
+                if samples:
+                    last_sample = time.time()
+                    for sample in samples:
+                        for ch in range(min(CHANNELS, len(sample))):
+                            self._buffers[ch].append(float(sample[ch]))
+
+                now = time.time()
+
+                # Disconnect detection: BLE thread dead + no data for N seconds.
+                if not ble_thread.is_alive() and now - last_sample > _STALE_TIMEOUT:
+                    print("[muse] Headset disconnected — will reconnect when turned on.")
+                    yield {**_DISCONNECTED_PACKET_TEMPLATE, 'timestamp': round(now, 3)}
+                    try:
+                        inlet.close_stream()
+                    except Exception:
+                        pass
+                    break  # restart outer loop
+
+                if now - last_yield >= 0.1:
+                    sq, good_mask = _channel_quality(self._buffers)
+                    variances = [
+                        round(float(np.var(list(self._buffers[i])[-64:])), 1) if len(self._buffers[i]) >= 32 else None
                         for i in range(CHANNELS)
-                    }
-                    yield {
-                        'timestamp':      round(now, 3),
-                        'connection':     'CONNECTED',
-                        'battery':        self.battery,
-                        'signal_quality': sq,
-                        'raw_eeg':        raw,
-                        'bands':          bands,
-                        'artifacts': {
-                            'headband_on': True,
-                            'blink':       artifacts['blink'],
-                            'jaw_clench':  artifacts['jaw_clench'],
-                        },
-                    }
-                    last_yield = now
+                    ]
+                    print(f"[quality] vars={variances} mask={good_mask} sq={sq}")
+                    bands = _compute_bands(self._buffers, good_mask)
+                    if bands:
+                        artifacts = self._artifact.detect(self._buffers, now, good_mask)
+                        raw = {
+                            f'eeg{i+1}': round(self._buffers[i][-1], 2) if self._buffers[i] else 0.0
+                            for i in range(CHANNELS)
+                        }
+                        yield {
+                            'timestamp':      round(now, 3),
+                            'connection':     'CONNECTED',
+                            'battery':        self.battery,
+                            'signal_quality': sq,
+                            'raw_eeg':        raw,
+                            'bands':          bands,
+                            'artifacts': {
+                                'headband_on': True,
+                                'blink':       artifacts['blink'],
+                                'jaw_clench':  artifacts['jaw_clench'],
+                            },
+                        }
+                        last_yield = now
 
-            await asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)
+
+            # Brief pause so the OS can clean up BLE resources before we rescan.
+            await asyncio.sleep(2.0)

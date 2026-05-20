@@ -2,16 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 
 const WS_URL     = 'ws://localhost:8000/ws'
 const HEALTH_URL = 'http://localhost:8000/health'
+const STALE_MS   = 4000  // mark headset gone if no packet for 4s
 
 export function useMuseWebSocket() {
-  const [data, setData]       = useState(null)
-  const [connected, setConn]  = useState(false)
-  const [mode, setMode]       = useState('mock')
-  const wsRef                 = useRef(null)
-  const retryRef              = useRef(null)
-  const retryDelay            = useRef(1000)
+  const [data, setData]                   = useState(null)
+  const [wsConnected, setWsConn]          = useState(false)
+  const [headsetConnected, setHeadset]    = useState(false)
+  const [mode, setMode]                   = useState('mock')
+  const wsRef                             = useRef(null)
+  const retryRef                          = useRef(null)
+  const heartbeatRef                      = useRef(null)
+  const retryDelay                        = useRef(1000)
 
-  // Fetch mode from health endpoint once on mount
   useEffect(() => {
     fetch(HEALTH_URL)
       .then(r => r.json())
@@ -22,23 +24,37 @@ export function useMuseWebSocket() {
   useEffect(() => {
     let alive = true
 
+    function armHeartbeat() {
+      clearTimeout(heartbeatRef.current)
+      heartbeatRef.current = setTimeout(() => setHeadset(false), STALE_MS)
+    }
+
     function connect() {
       if (!alive) return
       const ws = new WebSocket(WS_URL)
 
       ws.onopen = () => {
         if (!alive) { ws.close(); return }
-        setConn(true)
+        setWsConn(true)
         retryDelay.current = 1000
       }
 
       ws.onmessage = (e) => {
         if (!alive) return
-        try { setData(JSON.parse(e.data)) } catch {}
+        try {
+          const packet = JSON.parse(e.data)
+          setData(packet)
+          const up = packet.connection === 'CONNECTED'
+          setHeadset(up)
+          if (up) armHeartbeat()
+          else clearTimeout(heartbeatRef.current)
+        } catch {}
       }
 
       ws.onclose = () => {
-        setConn(false)
+        setWsConn(false)
+        setHeadset(false)
+        clearTimeout(heartbeatRef.current)
         if (!alive) return
         retryRef.current = setTimeout(() => {
           retryDelay.current = Math.min(retryDelay.current * 1.5, 8000)
@@ -54,9 +70,12 @@ export function useMuseWebSocket() {
     return () => {
       alive = false
       clearTimeout(retryRef.current)
+      clearTimeout(heartbeatRef.current)
       wsRef.current?.close()
     }
   }, [])
 
-  return { data, connected, mode }
+  // Legacy: expose `connected` as the headset state so existing components
+  // that read `connected` keep working without changes.
+  return { data, connected: headsetConnected, wsConnected, headsetConnected, mode }
 }

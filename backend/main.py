@@ -54,8 +54,12 @@ async def websocket_endpoint(ws: WebSocket):
 
 async def broadcast_loop():
     async for packet in stream.stream():
-        packet['sleep_state'] = classifier.classify(packet['bands'])
-        packet['sleep_description'] = classifier.description(packet['sleep_state'])
+        if packet.get('connection') == 'CONNECTED':
+            packet['sleep_state'] = classifier.classify(packet['bands'])
+            packet['sleep_description'] = classifier.description(packet['sleep_state'])
+        else:
+            packet['sleep_state'] = None
+            packet['sleep_description'] = None
         payload = json.dumps(packet)
         dead: set[WebSocket] = set()
         for ws in list(clients):
