@@ -77,9 +77,13 @@ def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> dict | None:
     Uses all good-quality channels. Research shows temporal (TP9/TP10) gives
     better alpha/sleep signal for 88% of users; frontal (AF7/AF8) better for
     beta/gamma. Using all good channels averages both strengths."""
-    good_idx = [i for i, ok in enumerate(good_mask) if ok]
+    # Prefer frontal channels (AF7=1, AF8=2) — ear sensors have frequent
+    # contact noise that looks like delta even when marked "good" by variance.
+    frontal = [i for i in [1, 2] if good_mask[i]]
+    ear     = [i for i in [0, 3] if good_mask[i]]
+    good_idx = frontal if frontal else ear
     if not good_idx:
-        good_idx = list(range(CHANNELS))
+        return None  # all channels poor — don't emit fake data
 
     min_samples = WINDOW // 2
     if any(len(buffers[i]) < min_samples for i in good_idx):
@@ -88,14 +92,25 @@ def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> dict | None:
     data = np.array([list(buffers[i])[-WINDOW:] for i in good_idx], dtype=np.float64)
 
     # Welch's method: 50% overlapping 1-second segments, Hanning window.
-    # Far more noise-resistant than single-window FFT — averages out transients.
     freq, psd = welch(data, fs=SAMPLE_RATE, nperseg=256, noverlap=128,
                       window='hann', axis=1, detrend='linear')
+
+    # Aperiodic (1/f) removal — FOOOF-style log-log line fit.
+    # EEG power naturally follows a 1/f slope so delta always dominates raw
+    # relative power. Fitting and subtracting the slope leaves only genuine
+    # brain oscillations above the noise floor.
+    fit_mask = (freq >= 1.0) & (freq <= 44.0) & (freq > 0)
+    log_freq = np.log10(freq[fit_mask])
+    psd_mean = np.mean(psd, axis=0)          # average across channels for stable fit
+    log_psd  = np.log10(np.maximum(psd_mean[fit_mask], 1e-30))
+    slope, intercept = np.polyfit(log_freq, log_psd, 1)
+    aperiodic = 10 ** (slope * np.log10(np.maximum(freq, 1e-10)) + intercept)
+    psd_flat  = psd / np.maximum(aperiodic[np.newaxis, :], 1e-30)  # flatten each channel
 
     abs_lin: dict[str, float] = {}
     for band, (lo, hi) in BAND_RANGES.items():
         idx = np.where((freq >= lo) & (freq < hi))[0]
-        abs_lin[band] = float(np.mean(psd[:, idx])) if len(idx) else 1e-12
+        abs_lin[band] = float(np.mean(psd_flat[:, idx])) if len(idx) else 1e-12
 
     total = sum(abs_lin.values())
     rel   = {b: abs_lin[b] / total for b in BANDS_ORDER}

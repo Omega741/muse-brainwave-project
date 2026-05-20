@@ -1,5 +1,11 @@
 # Muse Brainwave Monitor - CLAUDE.md
 
+## IMPORTANT — Claude Session Rules
+- **NEVER use `pkill`, `kill -9`, `taskkill /F /IM python.exe`, or `Get-Process python* | Stop-Process`** — broad process kills shut down the Claude Code session itself
+- To restart the backend: use `Stop-Process -Id <specific_pid>` or just let `--reload` pick up file changes automatically
+- **Do NOT kill node processes either** — kills the frontend and potentially Claude tooling
+- Prefer editing files and letting uvicorn `--reload` handle restarts over manual process kills
+
 ## Project Overview
 Real-time EEG brainwave visualization and sleep state detection dashboard for the Muse headset.
 Uses the official LibMuse Windows SDK 8.0.9. Currently runs with a realistic mock data stream for local UI development.
