@@ -60,13 +60,27 @@ def _ble_stream_worker(address: str | None):
     print("[muse] Headset disconnected.")
 
 
-def _connect_lsl_inlet() -> pylsl.StreamInlet:
-    """Keep trying until the LSL EEG stream appears (created by the BLE thread)."""
+def _connect_lsl_inlet(ble_thread: Thread) -> pylsl.StreamInlet | None:
+    """Wait for the EEG LSL stream created by the BLE thread.
+
+    Returns None if the BLE thread dies before a stream appears (failed connect).
+    Uses short resolve windows so we can check ble_thread.is_alive() frequently
+    and avoid latching onto a stale stream from a previous session.
+    """
+    print("[muse] Waiting for EEG LSL stream...")
     while True:
-        print("[muse] Waiting for EEG LSL stream...")
-        streams = pylsl.resolve_byprop('type', 'EEG', timeout=10)
+        if not ble_thread.is_alive():
+            print("[muse] BLE thread exited before LSL stream appeared — connection failed.")
+            return None
+        streams = pylsl.resolve_byprop('type', 'EEG', timeout=2)
         if streams:
             info = streams[0]
+            print(f"[muse] LSL stream found: {info.name()} @ {info.nominal_srate()} Hz")
+            # Verify the BLE thread is still alive — if it already died, the stream
+            # is stale from a previous session, not the one we just started.
+            if not ble_thread.is_alive():
+                print("[muse] BLE thread died while resolving — discarding stale stream.")
+                return None
             print(f"[muse] LSL stream online: {info.name()} @ {info.nominal_srate()} Hz")
             return pylsl.StreamInlet(info)
         print("[muse] LSL stream not ready yet, retrying...")
@@ -246,10 +260,26 @@ class RealMuseStream:
             ble_thread = Thread(target=_ble_stream_worker, args=(self.address,), daemon=True)
             ble_thread.start()
 
-            inlet: pylsl.StreamInlet = await loop.run_in_executor(None, _connect_lsl_inlet)
+            inlet: pylsl.StreamInlet | None = await loop.run_in_executor(
+                None, _connect_lsl_inlet, ble_thread
+            )
+            if inlet is None:
+                # BLE connection failed before LSL stream appeared.
+                print("[muse] Retrying BLE connection in 5s...")
+                await asyncio.sleep(5.0)
+                continue
 
-            last_yield  = time.time()
-            last_sample = time.time()
+            # Explicitly open the stream — required on some Windows/pylsl builds
+            # before pull_chunk will start returning samples.
+            try:
+                inlet.open_stream(timeout=5.0)
+            except Exception:
+                pass
+
+            last_yield    = time.time()
+            last_sample   = time.time()
+            last_status   = 0.0
+            ever_got_data = False   # guards against connecting to a truly dead outlet
 
             # Clear stale buffer data from a previous session.
             for buf in self._buffers:
@@ -257,17 +287,33 @@ class RealMuseStream:
 
             # Inner data loop — runs until disconnect is detected.
             while True:
-                samples, _ = inlet.pull_chunk(timeout=0.0, max_samples=64)
+                # Run pull_chunk in a thread so a small timeout doesn't stall
+                # the asyncio event loop; 50 ms is enough to catch the first batch.
+                samples, _ = await loop.run_in_executor(
+                    None, lambda: inlet.pull_chunk(timeout=0.05, max_samples=64)
+                )
                 if samples:
                     last_sample = time.time()
+                    ever_got_data = True
                     for sample in samples:
                         for ch in range(min(CHANNELS, len(sample))):
                             self._buffers[ch].append(float(sample[ch]))
 
                 now = time.time()
 
+                # Dead-outlet guard: LSL stream found but no data ever arrived
+                # (stale outlet race condition) — restart immediately.
+                if not ever_got_data and not ble_thread.is_alive() and now - last_sample > 3.0:
+                    print("[muse] No data from inlet and BLE dead — stale stream, restarting.")
+                    try:
+                        inlet.close_stream()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(3.0)
+                    break
+
                 # Disconnect detection: BLE thread dead + no data for N seconds.
-                if not ble_thread.is_alive() and now - last_sample > _STALE_TIMEOUT:
+                if ever_got_data and not ble_thread.is_alive() and now - last_sample > _STALE_TIMEOUT:
                     print("[muse] Headset disconnected — will reconnect when turned on.")
                     yield {**_DISCONNECTED_PACKET_TEMPLATE, 'timestamp': round(now, 3)}
                     try:
@@ -304,8 +350,19 @@ class RealMuseStream:
                             },
                         }
                         last_yield = now
-
-                await asyncio.sleep(0.01)
+                    elif now - last_status >= 1.0:
+                        # Headset is connected but buffers are still filling up.
+                        # Emit a heartbeat so the UI doesn't show "Reconnecting…".
+                        yield {
+                            'timestamp':      round(now, 3),
+                            'connection':     'CONNECTED',
+                            'battery':        self.battery,
+                            'signal_quality': sq,
+                            'raw_eeg':        {f'eeg{i+1}': 0.0 for i in range(CHANNELS)},
+                            'bands':          None,
+                            'artifacts':      {'headband_on': True, 'blink': False, 'jaw_clench': False},
+                        }
+                        last_status = now
 
             # Brief pause so the OS can clean up BLE resources before we rescan.
             await asyncio.sleep(2.0)
