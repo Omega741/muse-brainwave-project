@@ -86,22 +86,22 @@ def _connect_lsl_inlet(ble_thread: Thread) -> pylsl.StreamInlet | None:
         print("[muse] LSL stream not ready yet, retrying...")
 
 
-def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> dict | None:
-    """Compute band powers using Welch's method (overlapping windows).
-    Uses all good-quality channels. Research shows temporal (TP9/TP10) gives
-    better alpha/sleep signal for 88% of users; frontal (AF7/AF8) better for
-    beta/gamma. Using all good channels averages both strengths."""
-    # Prefer frontal channels (AF7=1, AF8=2) — ear sensors have frequent
-    # contact noise that looks like delta even when marked "good" by variance.
+def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> tuple[dict | None, list | None]:
+    """Compute band powers + raw spectrum using Welch's method.
+
+    Returns (bands, spectrum) where:
+      bands    — dict of 5 band powers (aperiodic-corrected relative %) or None
+      spectrum — list of 44 dB values for 1–44 Hz (raw PSD, for spectrogram) or None
+    """
     frontal = [i for i in [1, 2] if good_mask[i]]
     ear     = [i for i in [0, 3] if good_mask[i]]
     good_idx = frontal if frontal else ear
     if not good_idx:
-        return None  # all channels poor — don't emit fake data
+        return None, None
 
     min_samples = WINDOW // 2
     if any(len(buffers[i]) < min_samples for i in good_idx):
-        return None
+        return None, None
 
     data = np.array([list(buffers[i])[-WINDOW:] for i in good_idx], dtype=np.float64)
 
@@ -109,17 +109,20 @@ def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> dict | None:
     freq, psd = welch(data, fs=SAMPLE_RATE, nperseg=256, noverlap=128,
                       window='hann', axis=1, detrend='linear')
 
+    # Raw PSD spectrum in dB for the spectrogram (1–44 Hz, 1 Hz resolution).
+    # Uses the unmodified PSD so the display matches standard neuroscience tools.
+    psd_mean = np.mean(psd, axis=0)
+    spec_mask = (freq >= 1) & (freq <= 44)
+    spectrum  = [round(float(v), 1)
+                 for v in 10 * np.log10(np.maximum(psd_mean[spec_mask], 1e-30))]
+
     # Aperiodic (1/f) removal — FOOOF-style log-log line fit.
-    # EEG power naturally follows a 1/f slope so delta always dominates raw
-    # relative power. Fitting and subtracting the slope leaves only genuine
-    # brain oscillations above the noise floor.
     fit_mask = (freq >= 1.0) & (freq <= 44.0) & (freq > 0)
     log_freq = np.log10(freq[fit_mask])
-    psd_mean = np.mean(psd, axis=0)          # average across channels for stable fit
     log_psd  = np.log10(np.maximum(psd_mean[fit_mask], 1e-30))
     slope, intercept = np.polyfit(log_freq, log_psd, 1)
     aperiodic = 10 ** (slope * np.log10(np.maximum(freq, 1e-10)) + intercept)
-    psd_flat  = psd / np.maximum(aperiodic[np.newaxis, :], 1e-30)  # flatten each channel
+    psd_flat  = psd / np.maximum(aperiodic[np.newaxis, :], 1e-30)
 
     abs_lin: dict[str, float] = {}
     for band, (lo, hi) in BAND_RANGES.items():
@@ -129,7 +132,7 @@ def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> dict | None:
     total = sum(abs_lin.values())
     rel   = {b: abs_lin[b] / total for b in BANDS_ORDER}
 
-    return {
+    bands = {
         b: {
             'absolute': round(math.log10(max(abs_lin[b], 1e-12)), 3),
             'relative': round(rel[b], 4),
@@ -137,6 +140,7 @@ def _compute_bands(buffers: list[deque], good_mask: list[bool]) -> dict | None:
         }
         for b in BANDS_ORDER
     }
+    return bands, spectrum
 
 
 def _channel_quality(buffers: list[deque]) -> tuple[dict, list[bool]]:
@@ -269,10 +273,9 @@ class RealMuseStream:
                 await asyncio.sleep(5.0)
                 continue
 
-            # Explicitly open the stream — required on some Windows/pylsl builds
-            # before pull_chunk will start returning samples.
+            # open_stream with a short timeout nudges pylsl to start buffering.
             try:
-                inlet.open_stream(timeout=5.0)
+                inlet.open_stream(timeout=0.5)
             except Exception:
                 pass
 
@@ -329,7 +332,7 @@ class RealMuseStream:
                         for i in range(CHANNELS)
                     ]
                     print(f"[quality] vars={variances} mask={good_mask} sq={sq}")
-                    bands = _compute_bands(self._buffers, good_mask)
+                    bands, spectrum = _compute_bands(self._buffers, good_mask)
                     if bands:
                         artifacts = self._artifact.detect(self._buffers, now, good_mask)
                         raw = {
@@ -343,6 +346,7 @@ class RealMuseStream:
                             'signal_quality': sq,
                             'raw_eeg':        raw,
                             'bands':          bands,
+                            'spectrum':       spectrum,
                             'artifacts': {
                                 'headband_on': True,
                                 'blink':       artifacts['blink'],
@@ -351,8 +355,6 @@ class RealMuseStream:
                         }
                         last_yield = now
                     elif now - last_status >= 1.0:
-                        # Headset is connected but buffers are still filling up.
-                        # Emit a heartbeat so the UI doesn't show "Reconnecting…".
                         yield {
                             'timestamp':      round(now, 3),
                             'connection':     'CONNECTED',
@@ -360,6 +362,7 @@ class RealMuseStream:
                             'signal_quality': sq,
                             'raw_eeg':        {f'eeg{i+1}': 0.0 for i in range(CHANNELS)},
                             'bands':          None,
+                            'spectrum':       None,
                             'artifacts':      {'headband_on': True, 'blink': False, 'jaw_clench': False},
                         }
                         last_status = now

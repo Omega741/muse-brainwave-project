@@ -1,5 +1,6 @@
 import { useMuseWebSocket } from './hooks/useMuseWebSocket'
 import BandPowerChart from './components/BandPowerChart'
+import Spectrogram    from './components/Spectrogram'
 import EEGWaveform    from './components/EEGWaveform'
 import SleepState     from './components/SleepState'
 import SignalQuality  from './components/SignalQuality'
@@ -70,6 +71,8 @@ export default function App() {
           state={data?.sleep_state}
           description={data?.sleep_description}
         />
+
+        <Spectrogram data={data} />
 
         <BandPowerChart data={data} />
 
